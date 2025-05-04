@@ -35,6 +35,8 @@ const userSchema = z.object({
 	lastName: z.string().optional(),
 	/** The plaintext password to give the user. Must be at least 8 characters long, and can not be in any list of hacked passwords. */
 	password: z.string().optional(),
+	/** The ID of the organization to assign to the user */
+	clerkOrganizationId: z.string(),
 	/** The hashing algorithm that was used to generate the password digest.
 	 * @see https://clerk.com/docs/reference/backend-api/tag/Users#operation/CreateUser!path=password_hasher&t=request
 	 */
@@ -60,9 +62,9 @@ const userSchema = z.object({
 
 type User = z.infer<typeof userSchema>;
 
-const createUser = (userData: User) =>
-	userData.password
-		? clerkClient.users.createUser({
+const createUser = async (userData: User) => {
+	const user = userData.password
+		? await clerkClient.users.createUser({
 				externalId: userData.userId,
 				emailAddress: [userData.email],
 				firstName: userData.firstName,
@@ -73,7 +75,7 @@ const createUser = (userData: User) =>
 				publicMetadata: userData.public_metadata,
 				unsafeMetadata: userData.unsafe_metadata,
 		  })
-		: clerkClient.users.createUser({
+		: await clerkClient.users.createUser({
 				externalId: userData.userId,
 				emailAddress: [userData.email],
 				firstName: userData.firstName,
@@ -83,6 +85,16 @@ const createUser = (userData: User) =>
 				publicMetadata: userData.public_metadata,
 				unsafeMetadata: userData.unsafe_metadata,
 		  });
+
+	// Add user to organization
+	await clerkClient.organizations.createOrganizationMembership({
+		organizationId: userData.clerkOrganizationId,
+		userId: user.id,
+		role: "basic_member" // Default role for new members
+	});
+
+	return user;
+};
 
 const now = new Date().toISOString().split(".")[0]; // YYYY-MM-DDTHH:mm:ss
 function appendLog(payload: any) {
@@ -105,22 +117,22 @@ async function processUserToClerk(userData: User, spinner: Ora) {
 		await createUser(parsedUserData.data);
 
 		migrated++;
-	} catch (error) {
-		if (error.status === 422) {
-			appendLog({ userId: userData.userId, ...error });
+	} catch (error: any) {
+		if (error?.status === 422) {
+			appendLog({ userId: userData.userId, error: error.message });
 			alreadyExists++;
 			return;
 		}
 
 		// Keep cooldown in case rate limit is reached as a fallback if the thread blocking fails
-		if (error.status === 429) {
+		if (error?.status === 429) {
 			spinner.text = `${txt} - rate limit reached, waiting for ${RETRY_DELAY} ms`;
 			await rateLimitCooldown();
 			spinner.text = txt;
 			return processUserToClerk(userData, spinner);
 		}
 
-		appendLog({ userId: userData.userId, ...error });
+		appendLog({ userId: userData.userId, error: error.message });
 	}
 }
 
@@ -135,27 +147,27 @@ async function rateLimitCooldown() {
 async function main() {
 	console.log(`Clerk User Migration Utility`);
 
-	const inputFileName = process.argv[2] ?? "users.json";
+	const inputFileName = process.argv[2] ?? "logins.json";
 
 	console.log(`Fetching users from ${inputFileName}`);
 
 	const parsedUserData: any[] = JSON.parse(
 		fs.readFileSync(inputFileName, "utf-8")
 	);
-	const offsetUsers = parsedUserData.slice(OFFSET);
+	const offsetLogins = parsedUserData.slice(OFFSET);
 	console.log(
-		`users.json found and parsed, attempting migration with an offset of ${OFFSET}`
+		`logins.json found and parsed, attempting migration with an offset of ${OFFSET}`
 	);
 
 	let i = 0;
-	const spinner = ora(`Migrating users`).start();
+	const spinner = ora(`Migrating logins`).start();
 
-	for (const userData of offsetUsers) {
-		spinner.text = `Migrating user ${i}/${offsetUsers.length}, cooldown`;
+	for (const loginData of offsetLogins) {
+		spinner.text = `Migrating user ${i}/${offsetLogins.length}, cooldown`;
 		await cooldown();
 		i++;
-		spinner.text = `Migrating user ${i}/${offsetUsers.length}`;
-		await processUserToClerk(userData, spinner);
+		spinner.text = `Migrating user ${i}/${offsetLogins.length}`;
+		await processUserToClerk(loginData, spinner);
 	}
 
 	spinner.succeed(`Migration complete`);
@@ -163,6 +175,6 @@ async function main() {
 }
 
 main().then(() => {
-	console.log(`${migrated} users migrated`);
-	console.log(`${alreadyExists} users failed to upload`);
+	console.log(`${migrated} logins migrated`);
+	console.log(`${alreadyExists} logins failed to upload`);
 });

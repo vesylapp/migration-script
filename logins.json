@@ -1,0 +1,39 @@
+[
+    {
+      "loginId": "1",
+      "email": "john@example.com",
+      "firstName": "John",
+      "lastName": "Doe",
+      "sellerId": "1",
+      "password": "$2a$12$9HhLqMJxqBKhlZasxjlhger67GFcC4aOAtpcU.THpcSLiQve4mq6.",
+      "passwordHasher": "bcrypt"
+    },
+    {
+      "loginId": "2",
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Smith",
+      "sellerId": "1",
+      "password": "$2a$12$9HhLqMJxqBKhlZasxjlhger67GFcC4aOAtpcU.THpcSLiQve4mq6.",
+      "passwordHasher": "bcrypt"
+    },
+    {
+      "loginId": "3",
+      "email": "bob@example.com",
+      "firstName": "Bob",
+      "lastName": "Johnson",
+      "sellerId": "2",
+      "password": "$2a$12$9HhLqMJxqBKhlZasxjlhger67GFcC4aOAtpcU.THpcSLiQve4mq6.",
+      "passwordHasher": "bcrypt"
+    },
+    {
+      "loginId": "4",
+      "email": "emma@example.com",
+      "firstName": "Emma",
+      "lastName": "Davis",
+      "sellerId": "2",
+      "password": "$2a$12$9HhLqMJxqBKhlZasxjlhger67GFcC4aOAtpcU.THpcSLiQve4mq6.",
+      "passwordHasher": "bcrypt"
+    }
+  ]
+  

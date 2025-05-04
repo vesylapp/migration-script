@@ -13,10 +13,12 @@
     "@clerk/clerk-sdk-node": "^4.12.21",
     "dotenv": "^16.3.1",
     "ora": "^7.0.1",
+    "pg": "^8.11.3",
     "zod": "^3.22.4"
   },
   "devDependencies": {
     "ts-node": "^10.9.1",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "@types/pg": "^8.10.9"
   }
 }

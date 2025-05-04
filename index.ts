@@ -5,8 +5,10 @@ import * as fs from "fs";
 import * as z from "zod";
 import clerkClient from "@clerk/clerk-sdk-node";
 import ora, { Ora } from "ora";
+import { Pool } from "pg";
 
 const SECRET_KEY = process.env.CLERK_SECRET_KEY;
+const POSTGRES_URL = process.env.POSTGRES_URL;
 const DELAY = parseInt(process.env.DELAY_MS ?? `1_000`);
 const RETRY_DELAY = parseInt(process.env.RETRY_DELAY_MS ?? `10_000`);
 const IMPORT_TO_DEV = process.env.IMPORT_TO_DEV_INSTANCE ?? "false";
@@ -18,83 +20,40 @@ if (!SECRET_KEY) {
 	);
 }
 
+if (!POSTGRES_URL) {
+	throw new Error(
+		"POSTGRES_URL is required. Please add your PostgreSQL connection URL to .env."
+	);
+}
+
 if (SECRET_KEY.split("_")[1] !== "live" && IMPORT_TO_DEV === "false") {
 	throw new Error(
 		"The Clerk Secret Key provided is for a development instance. Development instances are limited to 500 users and do not share their userbase with production instances. If you want to import users to your development instance, please set 'IMPORT_TO_DEV_INSTANCE' in your .env to 'true'."
 	);
 }
 
-const userSchema = z.object({
-	/** The ID of the user as used in your external systems or your previous authentication solution. Must be unique across your instance. */
-	userId: z.string(),
-	/** Email address to set as User's primary email address. */
-	email: z.string().email(),
-	/** The first name to assign to the user */
-	firstName: z.string().optional(),
-	/** The last name to assign to the user */
-	lastName: z.string().optional(),
-	/** The plaintext password to give the user. Must be at least 8 characters long, and can not be in any list of hacked passwords. */
-	password: z.string().optional(),
-	/** The ID of the organization to assign to the user */
-	clerkOrganizationId: z.string(),
-	/** The hashing algorithm that was used to generate the password digest.
-	 * @see https://clerk.com/docs/reference/backend-api/tag/Users#operation/CreateUser!path=password_hasher&t=request
-	 */
-	passwordHasher: z
-		.enum([
-			"argon2i",
-			"argon2id",
-			"bcrypt",
-			"md5",
-			"pbkdf2_sha256",
-			"pbkdf2_sha256_django",
-			"pbkdf2_sha1",
-			"scrypt_firebase",
-		])
-		.optional(),
-	/** Metadata saved on the user, that is visible to both your Frontend and Backend APIs */
-	public_metadata: z.record(z.string(), z.unknown()).optional(),
-	/** Metadata saved on the user, that is only visible to your Backend APIs */
-	private_metadata: z.record(z.string(), z.unknown()).optional(),
-	/** Metadata saved on the user, that can be updated from both the Frontend and Backend APIs. Note: Since this data can be modified from the frontend, it is not guaranteed to be safe. */
-	unsafe_metadata: z.record(z.string(), z.unknown()).optional(),
+const pool = new Pool({
+	connectionString: POSTGRES_URL,
 });
 
-type User = z.infer<typeof userSchema>;
+interface UserRecord {
+	id: number;
+	email: string;
+	first_name: string;
+	last_name: string;
+	password: string;
+	company: string;
+	clerk_organization_id: string | null;
+}
 
-const createUser = async (userData: User) => {
-	const user = userData.password
-		? await clerkClient.users.createUser({
-				externalId: userData.userId,
-				emailAddress: [userData.email],
-				firstName: userData.firstName,
-				lastName: userData.lastName,
-				passwordDigest: userData.password,
-				passwordHasher: userData.passwordHasher,
-				privateMetadata: userData.private_metadata,
-				publicMetadata: userData.public_metadata,
-				unsafeMetadata: userData.unsafe_metadata,
-		  })
-		: await clerkClient.users.createUser({
-				externalId: userData.userId,
-				emailAddress: [userData.email],
-				firstName: userData.firstName,
-				lastName: userData.lastName,
-				skipPasswordRequirement: true,
-				privateMetadata: userData.private_metadata,
-				publicMetadata: userData.public_metadata,
-				unsafeMetadata: userData.unsafe_metadata,
-		  });
-
-	// Add user to organization
-	await clerkClient.organizations.createOrganizationMembership({
-		organizationId: userData.clerkOrganizationId,
-		userId: user.id,
-		role: "basic_member" // Default role for new members
-	});
-
-	return user;
-};
+interface LoginRecord {
+	id: number;
+	email: string;
+	first_name: string;
+	last_name: string;
+	password: string;
+	seller_id: number;
+}
 
 const now = new Date().toISOString().split(".")[0]; // YYYY-MM-DDTHH:mm:ss
 function appendLog(payload: any) {
@@ -107,74 +66,119 @@ function appendLog(payload: any) {
 let migrated = 0;
 let alreadyExists = 0;
 
-async function processUserToClerk(userData: User, spinner: Ora) {
-	const txt = spinner.text;
+async function createOrganization(user: UserRecord): Promise<string> {
 	try {
-		const parsedUserData = userSchema.safeParse(userData);
-		if (!parsedUserData.success) {
-			throw parsedUserData.error;
-		}
-		await createUser(parsedUserData.data);
-
-		migrated++;
+		const organization = await clerkClient.organizations.createOrganization({
+			name: user.company,
+			createdBy: user.email,
+		});
+		return organization.id;
 	} catch (error: any) {
-		if (error?.status === 422) {
-			appendLog({ userId: userData.userId, error: error.message });
-			alreadyExists++;
-			return;
-		}
-
-		// Keep cooldown in case rate limit is reached as a fallback if the thread blocking fails
-		if (error?.status === 429) {
-			spinner.text = `${txt} - rate limit reached, waiting for ${RETRY_DELAY} ms`;
-			await rateLimitCooldown();
-			spinner.text = txt;
-			return processUserToClerk(userData, spinner);
-		}
-
-		appendLog({ userId: userData.userId, error: error.message });
+		appendLog({ 
+			userId: user.id, 
+			error: `Failed to create organization: ${error.message}` 
+		});
+		throw error;
 	}
 }
 
-async function cooldown() {
-	await new Promise((r) => setTimeout(r, DELAY));
+async function createClerkUser(login: LoginRecord, organizationId: string) {
+	try {
+		const user = await clerkClient.users.createUser({
+			emailAddress: [login.email],
+			firstName: login.first_name,
+			lastName: login.last_name,
+			passwordDigest: login.password,
+			passwordHasher: "bcrypt",
+		});
+
+		await clerkClient.organizations.createOrganizationMembership({
+			organizationId: organizationId,
+			userId: user.id,
+			role: "basic_member"
+		});
+
+		return user;
+	} catch (error: any) {
+		if (error?.status === 422) {
+			appendLog({ 
+				loginId: login.id, 
+				error: "User already exists" 
+			});
+			alreadyExists++;
+			return null;
+		}
+		throw error;
+	}
 }
 
-async function rateLimitCooldown() {
-	await new Promise((r) => setTimeout(r, RETRY_DELAY));
+async function processUser(user: UserRecord, spinner: Ora) {
+	const txt = spinner.text;
+	try {
+		// Create organization if it doesn't exist
+		let organizationId = user.clerk_organization_id;
+		if (!organizationId) {
+			organizationId = await createOrganization(user);
+			// Update the user record with the new organization ID
+			await pool.query(
+				"UPDATE users SET clerk_organization_id = $1 WHERE id = $2",
+				[organizationId, user.id]
+			);
+		}
+
+		// Get all logins for this user
+		const { rows: logins } = await pool.query<LoginRecord>(
+			"SELECT * FROM logins WHERE seller_id = $1",
+			[user.id]
+		);
+
+		// Process each login
+		for (const login of logins) {
+			spinner.text = `Processing login ${login.id} for user ${user.id}`;
+			await createClerkUser(login, organizationId);
+			migrated++;
+			await new Promise((r) => setTimeout(r, DELAY));
+		}
+	} catch (error: any) {
+		if (error?.status === 429) {
+			spinner.text = `${txt} - rate limit reached, waiting for ${RETRY_DELAY} ms`;
+			await new Promise((r) => setTimeout(r, RETRY_DELAY));
+			spinner.text = txt;
+			return processUser(user, spinner);
+		}
+		appendLog({ 
+			userId: user.id, 
+			error: error.message 
+		});
+	}
 }
 
 async function main() {
 	console.log(`Clerk User Migration Utility`);
 
-	const inputFileName = process.argv[2] ?? "logins.json";
+	const spinner = ora("Fetching users from database").start();
+	
+	try {
+		const { rows: users } = await pool.query<UserRecord>(
+			"SELECT * FROM users ORDER BY id OFFSET $1",
+			[OFFSET]
+		);
 
-	console.log(`Fetching users from ${inputFileName}`);
+		spinner.text = `Found ${users.length} users to process`;
 
-	const parsedUserData: any[] = JSON.parse(
-		fs.readFileSync(inputFileName, "utf-8")
-	);
-	const offsetLogins = parsedUserData.slice(OFFSET);
-	console.log(
-		`logins.json found and parsed, attempting migration with an offset of ${OFFSET}`
-	);
+		for (const user of users) {
+			await processUser(user, spinner);
+		}
 
-	let i = 0;
-	const spinner = ora(`Migrating logins`).start();
-
-	for (const loginData of offsetLogins) {
-		spinner.text = `Migrating user ${i}/${offsetLogins.length}, cooldown`;
-		await cooldown();
-		i++;
-		spinner.text = `Migrating user ${i}/${offsetLogins.length}`;
-		await processUserToClerk(loginData, spinner);
+		spinner.succeed(`Migration complete`);
+		console.log(`${migrated} logins migrated`);
+		console.log(`${alreadyExists} logins already existed`);
+	} catch (error) {
+		spinner.fail("Migration failed");
+		console.error(error);
+	} finally {
+		await pool.end();
 	}
-
-	spinner.succeed(`Migration complete`);
-	return;
 }
 
-main().then(() => {
-	console.log(`${migrated} logins migrated`);
-	console.log(`${alreadyExists} logins failed to upload`);
-});
+main();
